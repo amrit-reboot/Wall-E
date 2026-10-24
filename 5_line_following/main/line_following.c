@@ -30,6 +30,25 @@
  *   3. Speed scales down with |error|: base = optimum - SLOW_K*|error| (floored at lower_duty_cycle).
  *   SHARP_*, SLOW_K and LOST_EDGE_MS are starting guesses: tune on the track.
  *
+ * STEP 6: CROSS_MS set from measurements (see its comment); node trigger needs 4 sensors, not 3.
+ *   NOT COMPILED, treat as first version.
+ *
+ * STEP 7: DIAGNOSTIC build. Same behaviour as step 6 by default, plus:
+ *   - feature switches (USE_SHARP_MODE / USE_FAST_LOST / USE_SPEED_SCALE / NODE_MIN_SENSORS) so each
+ *     recent change can be turned off one at a time to find which one causes random turns.
+ *   - a 200-entry trace of the last ~2 s: timestamp, sensor bits (left..right), count, event letter.
+ *     It is printed whenever the bot is already stopped (after every pivot / recovery spin, and when it
+ *     starts waiting for the line). Printing takes ~1 s with the motors off: this is a debug build only.
+ *     Event letters: F follow, K sharp-turn mode, R node roll-over, T turn spin, N node triggered,
+ *     l/s/r/u node decision left/straight/right/uturn, P pivot start, V lost-line recovery start, W waiting.
+ *   NOT COMPILED, treat as first version.
+ *
+ * STEP 8: fixes the pivot timeout seen in the step 7 log. NOT COMPILED, treat as first version.
+ *   The log showed pivots took 974 and 1118 ms against a 1200 ms limit, and the third pivot failed at
+ *   1210 ms because the leave-old-line phase used ~570 ms of the SAME clock, leaving ~630 ms to find the
+ *   new line. Now each phase has its own clock (PIVOT_LEAVE_MS / PIVOT_FIND_MS) and pivots spin at
+ *   PIVOT_DUTY 50. TRACE_DUMP_ON_TURN is off (dump still happens when the bot stops and waits).
+ *
  * Kept from step 2: re-arm after nodes, debounced pivots, split timeouts, END armed from line acquired.
  * Timeout values are still guesses: tune from the "took N ms" logs.
  * ASSUMPTION: sra_board.h provides MOTOR_BACKWARD, bound(), map(), line_sensor_array.
@@ -61,11 +80,21 @@
 #define END_ARM_MS      6000   // END box can only trigger this long after the line was acquired
 #define DEBUG_PRINT     1
 
+/* feature switches: set to 0 to disable a feature while hunting for the cause of bad behaviour */
+#define USE_SHARP_MODE      1   // inside wheel reverses when the line is at the far edge
+#define USE_FAST_LOST       1   // react after LOST_EDGE_MS when the line vanished off an edge
+#define USE_SPEED_SCALE     1   // base speed drops with |error|
+#define NODE_MIN_SENSORS    4   // sensors needed (plus an outer one) to call a wide bar a node. Try 3 as well.
+#define TRACE_DUMP_ON_TURN  0   // dump the trace after every pivot / recovery spin
+
 /* ---------------- maze config (tune) ---------------- */
 #define CROSS_DUTY          40
-#define CROSS_MS            120    // TUNE FIRST
+#define CROSS_MS            230    // measured: LSA-to-axle d=50-55mm, line w=30-40mm, v~250-300mm/s at CROSS_DUTY 40
+                                   // CROSS_MS ~ (d + w/2)/v - 20ms ~ 200..280. Test 200 / 230 / 260.
 #define TURN_DUTY           40
-#define PIVOT_TIMEOUT_MS    1200
+#define PIVOT_DUTY          50     // pivot spin speed (recovery spin keeps TURN_DUTY). Log showed ~1 s per 90deg at 40.
+#define PIVOT_LEAVE_MS      900    // max time to leave the old line (its own clock)
+#define PIVOT_FIND_MS       2200   // max time to find the new line (its OWN clock, not shared with the leave phase)
 #define UTURN_TIMEOUT_MS    2000
 #define TURN_CONFIRM        2
 #define LOST_MS             120    // line lost while last seen centred => dead end / gap
@@ -194,6 +223,50 @@ static int get_bits(bool on[5])
     return c;
 }
 
+/* ================= trace (debug) ================= */
+#define TRACE_N 200
+typedef struct { uint32_t t; uint8_t bits; uint8_t cnt; char ev; } trace_t;
+static trace_t g_trace[TRACE_N];
+static int  g_trace_head = 0, g_trace_count = 0;
+static char g_ev = 'F';
+
+static void trace_push(const bool on[5], int cnt, char ev)
+{
+    uint8_t b = 0;
+    for (int i = 0; i < 5; i++) b = (uint8_t)((b << 1) | (on[i] ? 1 : 0));
+    g_trace[g_trace_head].t = (uint32_t)now_ms();
+    g_trace[g_trace_head].bits = b;
+    g_trace[g_trace_head].cnt = (uint8_t)cnt;
+    g_trace[g_trace_head].ev = ev;
+    g_trace_head = (g_trace_head + 1) % TRACE_N;
+    if (g_trace_count < TRACE_N) g_trace_count++;
+}
+
+/* uses the most recent sensor read */
+static void trace_mark(char ev)
+{
+    bool on[5];
+    int c = get_bits(on);
+    trace_push(on, c, ev);
+}
+
+/* call only while the motors are stopped: printing takes about a second */
+static void trace_dump(const char *why)
+{
+    ESP_LOGW(TAG, "TRACE (%s) oldest->newest: t_ms bits(L..R) cnt ev", why);
+    int start = (g_trace_head - g_trace_count + TRACE_N) % TRACE_N;
+    for (int k = 0; k < g_trace_count; k++) {
+        trace_t *e = &g_trace[(start + k) % TRACE_N];
+        char bs[6];
+        for (int j = 0; j < 5; j++) bs[j] = ((e->bits >> (4 - j)) & 1) ? '1' : '0';
+        bs[5] = 0;
+        ESP_LOGW(TAG, "%u %s %d %c", (unsigned)e->t, bs, (int)e->cnt, e->ev);
+        if (k % 20 == 19) vTaskDelay(1);
+    }
+    ESP_LOGW(TAG, "TRACE end");
+    g_trace_count = 0;
+}
+
 /* remember which side of the bot the line was last on (call whenever any sensor sees the line) */
 static void update_last_side(const bool on[5])
 {
@@ -207,11 +280,13 @@ static void update_last_side(const bool on[5])
 
 static void follow_step(const bool on[5], int cnt)
 {
+    g_ev = 'F';
     calculate_error();
     calculate_correction();      // always run, so prev_error / integral stay current
 
     /* sharp-turn mode: line at the far edge, centre dark. Inside wheel goes backwards. */
-    if ((on[0] || on[4]) && !on[2] && cnt <= 2 && !(on[0] && on[4])) {
+    if (USE_SHARP_MODE && (on[0] || on[4]) && !on[2] && cnt <= 2 && !(on[0] && on[4])) {
+        g_ev = 'K';
         if (on[0]) {             // line on the left -> turn left -> left wheel is the inside wheel
             left_duty_cycle  = -SHARP_IN_DUTY;
             right_duty_cycle = SHARP_OUT_DUTY;
@@ -224,7 +299,7 @@ static void follow_step(const bool on[5], int cnt)
     }
 
     /* normal PD: slow the base speed down as the error grows */
-    float base = optimum_duty_cycle - SLOW_K * fabsf(error);
+    float base = optimum_duty_cycle - (USE_SPEED_SCALE ? SLOW_K * fabsf(error) : 0.0f);
     if (base < lower_duty_cycle)   base = lower_duty_cycle;
     if (base > optimum_duty_cycle) base = optimum_duty_cycle;
 
@@ -250,6 +325,8 @@ static void wait_for_line(int max_cnt)
     int64_t last_log = 0;
     drive(0, 0);
     ESP_LOGW(TAG, "waiting for line (stopped)");
+    trace_mark('W');
+    trace_dump("stopped");
     while (hits < RESUME_READS) {
         read_and_normalize();
         int cnt = get_bits(on);
@@ -275,7 +352,7 @@ static bool wait_centre(bool want_on, int64_t t0, int timeout_ms)
     bool on[5];
     int hits = 0;
     while (now_ms() - t0 < timeout_ms) {
-        read_and_normalize(); get_bits(on);
+        read_and_normalize(); get_bits(on); trace_mark('T');
         if (on[2] == want_on) {
             if (++hits >= TURN_CONFIRM) return true;
         } else {
@@ -289,20 +366,25 @@ static bool wait_centre(bool want_on, int64_t t0, int timeout_ms)
 /* dir: -1 = left, +1 = right. Spin until the centre sensor leaves the old line, then finds the next. */
 static void pivot(int dir)
 {
-    drive(dir < 0 ? -TURN_DUTY : TURN_DUTY, dir < 0 ? TURN_DUTY : -TURN_DUTY);
+    trace_mark('P');
+    drive(dir < 0 ? -PIVOT_DUTY : PIVOT_DUTY, dir < 0 ? PIVOT_DUTY : -PIVOT_DUTY);
 
     int64_t t0 = now_ms();
-    bool found = wait_centre(false, t0, PIVOT_TIMEOUT_MS) &&
-                 wait_centre(true,  t0, PIVOT_TIMEOUT_MS);
+    bool found = wait_centre(false, now_ms(), PIVOT_LEAVE_MS);      // phase A: leave old line
+    int leave_ms = (int)(now_ms() - t0);
+    if (found) found = wait_centre(true, now_ms(), PIVOT_FIND_MS);  // phase B: find new line, fresh clock
     drive(0, 0);
 
     if (found) {
-        ESP_LOGI(TAG, "pivot took %d ms", (int)(now_ms() - t0));
+        ESP_LOGI(TAG, "pivot took %d ms (leave phase %d ms)", (int)(now_ms() - t0), leave_ms);
         g_last_side = 0;
     } else {
         ESP_LOGE(TAG, "pivot: line not found after %d ms", (int)(now_ms() - t0));
         wait_for_line(5);
     }
+#if TRACE_DUMP_ON_TURN
+    trace_dump("after pivot");
+#endif
     vTaskDelay(pdMS_TO_TICKS(40));
     reset_pid();
 }
@@ -322,6 +404,7 @@ static bool spin_find(int dir, int timeout_ms)
 static void recover_line(void)
 {
     int dir = (g_last_side == 0) ? -1 : g_last_side;
+    trace_mark('V');
     int64_t t0 = now_ms();
 
     ESP_LOGI(TAG, "line lost, spinning %s (last side=%d)", dir < 0 ? "LEFT" : "RIGHT", g_last_side);
@@ -339,6 +422,9 @@ static void recover_line(void)
         wait_for_line(5);
     }
     g_edge = false;
+#if TRACE_DUMP_ON_TURN
+    trace_dump("after recovery");
+#endif
     vTaskDelay(pdMS_TO_TICKS(40));
     reset_pid();
 }
@@ -354,7 +440,7 @@ static bool run_node(bool preL, bool preR)
     drive(CROSS_DUTY, CROSS_DUTY);
     int64_t t0 = now_ms();
     while (now_ms() - t0 < CROSS_MS) {
-        read_and_normalize(); get_bits(on);
+        read_and_normalize(); get_bits(on); trace_mark('R');
         seenL |= on[0];
         seenR |= on[4];
         vTaskDelay(pdMS_TO_TICKS(5));
@@ -381,10 +467,10 @@ static bool run_node(bool preL, bool preR)
     ESP_LOGI(TAG, "node  L=%d S=%d R=%d", seenL, S, seenR);
 
     /* left-hand priority: left, straight, right, else dead end */
-    if (seenL)      { ESP_LOGI(TAG, "-> LEFT");  pivot(-1); }
-    else if (S)     { ESP_LOGI(TAG, "-> STRAIGHT"); reset_pid(); }
-    else if (seenR) { ESP_LOGI(TAG, "-> RIGHT"); pivot(+1); }
-    else            { ESP_LOGI(TAG, "-> UTURN"); g_last_side = 0; recover_line(); }
+    if (seenL)      { ESP_LOGI(TAG, "-> LEFT"); trace_mark('l'); pivot(-1); }
+    else if (S)     { ESP_LOGI(TAG, "-> STRAIGHT"); trace_mark('s'); reset_pid(); }
+    else if (seenR) { ESP_LOGI(TAG, "-> RIGHT"); trace_mark('r'); pivot(+1); }
+    else            { ESP_LOGI(TAG, "-> UTURN"); trace_mark('u'); g_last_side = 0; recover_line(); }
 
     return false;
 }
@@ -465,7 +551,7 @@ void line_follow_task(void* arg)
         /* line lost for LOST_MS: drift or dead end -> recover toward the side it was last seen */
         if (cnt == 0) {
             if (!lost_since) lost_since = now_ms();
-            int lost_limit = (g_edge && g_last_side != 0) ? LOST_EDGE_MS : LOST_MS;
+            int lost_limit = (USE_FAST_LOST && g_edge && g_last_side != 0) ? LOST_EDGE_MS : LOST_MS;
             if (now_ms() - lost_since >= lost_limit) {
                 lost_since = 0;
                 recover_line();
@@ -477,7 +563,9 @@ void line_follow_task(void* arg)
         }
 
         /* node detection with re-arm */
-        bool wide = (on[0] || on[4]) && cnt >= 3;
+        /* line is 30-40mm wide and sensor pitch ~14mm, so a centred bot shows ~3 sensors on a straight.
+         * Require 4 so a small drift on a plain line is not mistaken for a junction. */
+        bool wide = (on[0] || on[4]) && cnt >= NODE_MIN_SENSORS;
         if (!node_armed) {
             node_cnt = 0; preL = preR = false;
             if (!wide) {
@@ -490,6 +578,7 @@ void line_follow_task(void* arg)
             preR |= on[4];
             if (++node_cnt >= NODE_CONFIRM) {
                 node_cnt = 0;
+                trace_mark('N');
                 bool end = run_node(preL, preR);
                 preL = preR = false;
                 node_armed = false; rearm_cnt = 0;
@@ -501,6 +590,7 @@ void line_follow_task(void* arg)
         }
 
         follow_step(on, cnt);
+        trace_mark(g_ev);
 
 #ifdef CONFIG_ENABLE_OLED
         if (read_pid_const().val_changed)
