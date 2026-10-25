@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wall-E · Maze solver</title>
+<style>
+:root{color-scheme:light;font-family:system-ui,sans-serif;color:#222;background:#f5f5f3}*{box-sizing:border-box}
+body{max-width:840px;margin:0 auto;padding:24px 16px}header,.row{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+h1{font-size:22px;margin:0}h2{font-size:15px;margin:0 0 16px}p{line-height:1.5}small,.muted{color:#666;font-size:13px}
+section,details{background:white;border:1px solid #ddd;border-radius:8px;padding:20px;margin-top:16px}
+#state{font-size:24px;font-weight:600;margin:12px 0 4px}#reason{margin:0;color:#555;font-size:14px}
+.sensors{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}.sensor{text-align:center;min-width:0}
+meter{width:100%;height:22px;accent-color:#4c6b57}output,.mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,monospace}
+.detect{font-size:11px;display:block;padding:5px;border:1px solid #aaa;border-radius:4px;margin-top:6px;background:#252525;color:white}
+.detect.white{background:white;color:#222}.motors{display:flex;gap:32px;margin-top:20px}.motors strong{display:block;margin-top:4px;font-weight:500}
+button{border:1px solid #888;background:#fff;color:#222;border-radius:5px;padding:9px 14px;cursor:pointer;font:inherit;font-size:14px}button:disabled{opacity:.45;cursor:default}
+button.primary{background:#253e30;color:white;border-color:#253e30}.fields{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}label{font-size:13px}input{width:100%;margin-top:5px;padding:8px;border:1px solid #bbb;border-radius:4px;font:inherit}
+summary{cursor:pointer;font-size:14px}table{border-collapse:collapse;width:100%;font-size:12px;margin-top:16px}th,td{text-align:right;padding:8px 3px;border-bottom:1px solid #eee}th:first-child,td:first-child{text-align:left}
+#events{list-style:none;padding:0;margin:0}#events li{font-size:13px;padding:8px 0;border-top:1px solid #eee}#events time{color:#777;margin-right:12px}#message{min-height:22px;font-size:13px}#connection{font-size:13px}.bad{color:#a12828}
+@media(max-width:480px){section,details{padding:15px}.fields{grid-template-columns:repeat(2,1fr)}.sensors{gap:5px}.sensor small{font-size:11px}}
+</style></head><body>
+<header><h1>Wall-E <span class="muted">/ Maze solver</span></h1><span id="connection" role="status">Connecting…</span></header>
+<section><div class="row"><span class="muted">WHITE LINE · LEFT FIRST</span><button id="run" disabled>Pause robot</button></div>
+<div id="state">Waiting for data</div><p id="reason">Connect to the robot’s Wi-Fi to view live readings.</p></section>
+<section><h2>Line sensors <span class="muted">left → right</span></h2><div class="sensors" id="sensors"></div>
+<div class="motors"><div><small>Left command</small><strong id="left" class="mono">—</strong></div><div><small>Right command</small><strong id="right" class="mono">—</strong></div><div><small>Line error</small><strong id="error" class="mono">—</strong></div></div>
+<p class="muted">Motor values are commanded duty, not measured wheel speed.</p></section>
+<section><h2>Tuning</h2><form id="tuning"><div class="fields">
+<label>Kp<input id="kp" type="number" min="0" max="100" step="0.01" required></label>
+<label>Ki<input id="ki" type="number" min="0" max="100" step="0.01" required></label>
+<label>Kd<input id="kd" type="number" min="0" max="100" step="0.01" required></label>
+<label>White threshold<input id="threshold" type="number" min="100" max="950" step="1" required></label>
+<label>Cruise duty (%)<input id="cruise" type="number" min="25" max="60" step="1" required></label>
+<label>Pivot duty (%)<input id="turn" type="number" min="25" max="60" step="1" required></label>
+</div><p><button class="primary" id="apply" disabled>Apply &amp; save</button></p></form><div id="message" role="status"></div></section>
+<details><summary>Sensor details &amp; calibration</summary>
+<p class="muted">Pause first. Place all five sensors over the actual black surface, capture black, then over white and capture white. Both captures are required. Reposition on the line before resuming.</p>
+<div class="row"><button id="black" disabled>Capture black</button><button id="white" disabled>Capture white</button></div>
+<p id="capture" class="muted"></p><div style="overflow-x:auto"><table><thead><tr><th>Sensor</th><th>Raw ADC</th><th>White 0–1000</th><th>Black ref.</th><th>White ref.</th></tr></thead><tbody id="raw"></tbody></table></div>
+<p class="muted" id="network"></p><p class="muted" id="thresholdInfo"></p></details>
+<section><h2>Recent decisions</h2><ul id="events"><li>Waiting for controller</li></ul><p class="muted">Latest eight controller events. No route memory or shortest-path calculation.</p></section>
+<script>
+'use strict';
+const $=id=>document.getElementById(id),keys=['kp','ki','kd','threshold','cruise','turn'];
+let initial=true,last=null,lastTick=null,lastAdvance=0,connected=false;
+for(let i=0;i<5;i++){
+ const el=document.createElement('div');el.className='sensor';
+ el.innerHTML=`<small>S${i+1}</small><meter min="0" max="1000" value="0" aria-label="Sensor ${i+1} white strength"></meter><output>—</output><span class="detect">—</span>`;
+ $('sensors').append(el);
+}
+function controls(ok){$('run').disabled=!ok;$('apply').disabled=!ok;for(const s of ['black','white'])$(s).disabled=!ok||!last?.paused||last.state!=='Paused';}
+function offline(text){connected=false;$('connection').textContent=text;$('connection').className='bad';controls(false);}
+function command(v){return `${Math.abs(v).toFixed(0)}% ${v>0?'forward':v<0?'reverse':'stopped'}`;}
+async function post(path,body){
+ const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(4000)});
+ const text=await response.text();if(!response.ok)throw Error(text.replace(/<[^>]*>/g,''));$('message').textContent=text;
+}
+$('run').onclick=async()=>{if(!last||!connected)return;try{await post('/api/run',{running:last.paused});}catch(e){$('message').textContent=e.message;}};
+$('tuning').onsubmit=async event=>{event.preventDefault();if(!connected)return;const body={};for(const key of keys)body[key]=Number($(key).value);try{await post('/api/settings',body);}catch(e){$('message').textContent=e.message;}};
+for(const surface of ['black','white'])$(surface).onclick=async()=>{try{await post('/api/calibrate',{surface});}catch(e){$('message').textContent=e.message;}};
+async function poll(){
+ try{
+  const r=await fetch('/api/state',{cache:'no-store',signal:AbortSignal.timeout(1500)});if(!r.ok)throw Error('HTTP '+r.status);
+  const s=await r.json();last=s;const now=performance.now();
+  if(lastTick!==s.ms){lastTick=s.ms;lastAdvance=now;}
+  if(!s.ready||s.age_ms>1000||now-lastAdvance>1000){offline('Stale controller data');}
+  else{connected=true;$('connection').textContent='Live · '+s.age_ms+' ms old';$('connection').className='';controls(true);}
+  $('state').textContent=s.state;$('reason').textContent=s.reason;$('run').textContent=s.paused?'Resume robot':'Pause robot';
+  [...$('sensors').children].forEach((el,i)=>{el.querySelector('meter').value=s.values[i];el.querySelector('output').textContent=s.values[i];const white=!!(s.bits&(1<<i));const tag=el.querySelector('.detect');tag.className='detect'+(white?' white':'');tag.textContent=white?'WHITE':'BLACK';});
+  $('left').textContent=command(s.left);$('right').textContent=command(s.right);$('error').textContent=s.error.toFixed(1);
+  if(initial&&s.ready){for(const key of keys)$(key).value=s[key];initial=false;}
+  $('raw').replaceChildren();for(let i=0;i<5;i++){const tr=document.createElement('tr');for(const value of ['S'+(i+1),s.raw[i],s.values[i],s.black[i],s.white[i]]){const td=document.createElement('td');td.textContent=value;tr.append(td);}$('raw').append(tr);}
+  $('network').textContent='AP '+s.ap+' · Router '+(s.sta==='0.0.0.0'?'not connected':s.sta);
+  $('thresholdInfo').textContent=`White turns on at ${s.threshold+s.hysteresis}; off below ${s.threshold-s.hysteresis}. Higher values mean stronger white after calibration.`;
+  $('capture').textContent=`Pending captures: black ${s.black_captured?'yes':'no'} · white ${s.white_captured?'yes':'no'}`;
+  $('events').replaceChildren();for(const e of s.events.slice().reverse()){const li=document.createElement('li'),time=document.createElement('time');time.textContent=(e.ms/1000).toFixed(1)+'s';li.append(time,document.createTextNode(e.text));$('events').append(li);}
+ }catch(e){offline('Disconnected · readings frozen');}
+ setTimeout(poll,200);
+}
+poll();
+</script></body></html>

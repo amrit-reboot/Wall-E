@@ -1,0 +1,188 @@
+#include "maze_controller.h"
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static float clamp(float x, float lo, float hi) { return fminf(hi, fmaxf(lo, x)); }
+static void pid_reset(maze_controller_t *m)
+{ m->previous = m->integral = m->derivative = 0; }
+static void enter(maze_controller_t *m, maze_state_t s, uint32_t now, const char *reason)
+{
+    m->state = s; m->since = now; m->reason = reason; m->sequence++;
+    m->hits = 0; m->left_old_line = false;
+    pid_reset(m);
+}
+const char *maze_state_name(maze_state_t s)
+{
+    static const char *names[] = {"Starting", "Following", "Sharp left", "Sharp right",
+        "Inspecting junction", "Turning left", "Turning right", "Searching left",
+        "Stopping forward", "Paused", "Sensor fault"};
+    return (unsigned)s < sizeof(names)/sizeof(names[0]) ? names[s] : "Unknown";
+}
+maze_config_t maze_defaults(void)
+{
+    return (maze_config_t){.kp=.9f, .ki=0, .kd=6.5f,
+        .black={4095,4095,4095,4095,4095}, .white={0,0,0,0,0},
+        .threshold=820, .hysteresis=20, .launch_ms=300, .cross_ms=120,
+        .cruise=40, .turn=35};
+}
+bool maze_config_valid(const maze_config_t *c)
+{
+    if (!isfinite(c->kp) || !isfinite(c->ki) || !isfinite(c->kd) ||
+        c->kp < 0 || c->kp > 100 || c->ki < 0 || c->ki > 100 || c->kd < 0 || c->kd > 100 ||
+        c->threshold < 100 || c->threshold > 950 || c->hysteresis < 0 || c->hysteresis > 50 ||
+        c->launch_ms < 0 || c->launch_ms > 1000 || c->cross_ms < 20 || c->cross_ms > 400 ||
+        !isfinite(c->cruise) || c->cruise < 25 || c->cruise > 60 ||
+        !isfinite(c->turn) || c->turn < 25 || c->turn > 60) return false;
+    for (int i=0; i<5; ++i)
+        if (c->black[i]<0 || c->black[i]>4095 || c->white[i]<0 || c->white[i]>4095 ||
+            abs(c->white[i]-c->black[i])<100) return false;
+    return true;
+}
+void maze_init(maze_controller_t *m, uint32_t now)
+{
+    memset(m, 0, sizeof(*m)); m->armed=true;
+    enter(m, MAZE_LAUNCH, now, "Initial forward launch");
+}
+static float slew(float old, float target)
+{
+    // Pass through zero before reversing. At nominal 10 ms, 4% per tick.
+    if (old*target < 0) target=0;
+    return old + clamp(target-old, -4, 4);
+}
+void maze_step(maze_controller_t *m, const maze_config_t *c, const int raw[5],
+               uint32_t now, bool paused, maze_sample_t *out)
+{
+    memset(out,0,sizeof(*out)); out->ms=now; out->ready=true;
+    int count=0, instant=0;
+    float sum=0, weighted=0;
+    static const float weights[5]={-50,-25,0,25,50};
+    for (int i=0;i<5;i++) {
+        float strength=clamp(1000.0f*(raw[i]-c->black[i])/(c->white[i]-c->black[i]),0,1000);
+        if (strength >= c->threshold-c->hysteresis) instant++;
+        m->filtered[i]=m->initialized ? .4f*m->filtered[i]+.6f*strength : strength;
+        float boundary=c->threshold+(m->white_bits[i] ? -c->hysteresis : c->hysteresis);
+        m->white_bits[i]=m->filtered[i]>=boundary;
+        out->raw[i]=raw[i]; out->values[i]=(int)m->filtered[i];
+        if(m->white_bits[i]) { count++; out->bits|=1<<i; sum+=m->filtered[i]; weighted+=weights[i]*m->filtered[i]; }
+    }
+    m->initialized=true; out->count=count;
+    if (sum>0) m->error=weighted/sum;
+    bool centre=m->white_bits[2], left=m->white_bits[0], right=m->white_bits[4];
+    bool wide=(left||right)&&count>=3;
+    bool normal=centre&&count>0&&count<=3;
+    float l=0,r=0;
+
+    if (paused) {
+        if(m->state!=MAZE_PAUSED) enter(m,MAZE_PAUSED,now,"Paused from dashboard");
+        m->left=m->right=0;
+        goto done;
+    }
+    if(m->state==MAZE_PAUSED) {
+        m->armed=false; m->clear_since=now;
+        enter(m, instant ? MAZE_FOLLOW : MAZE_SETTLE, now,"Resumed from dashboard");
+    }
+    // No forward coasting once every sensor reports no white. Startup is the only exception.
+    if(m->state!=MAZE_LAUNCH && instant==0 && m->state!=MAZE_SEARCH &&
+       m->state!=MAZE_SETTLE && m->state!=MAZE_TURN_LEFT && m->state!=MAZE_TURN_RIGHT) {
+        if(m->state==MAZE_INSPECT && (m->left_seen||m->right_seen)) {
+            enter(m,m->left_seen ? MAZE_TURN_LEFT : MAZE_TURN_RIGHT,now,"Branch confirmed; forward line ended");
+            m->left_old_line=true;
+        } else enter(m,MAZE_SETTLE,now,"No white: stop forward, then search left");
+        m->left=m->right=0;
+        goto done;
+    }
+    if(m->state==MAZE_LAUNCH) {
+        if(now-m->since < (uint32_t)c->launch_ms) { l=r=30; goto drive; }
+        enter(m,instant ? MAZE_FOLLOW : MAZE_SETTLE,now,"Startup launch complete");
+    }
+    // An actual all-white area overrides a pivot/search as well as normal following.
+    // Require the unfiltered readings too, so a stale filtered pattern cannot drive on black.
+    if(count==5 && instant==5) {
+        if(m->state!=MAZE_FOLLOW || strcmp(m->reason,"All white: straight, no finish stop"))
+            enter(m,MAZE_FOLLOW,now,"All white: straight, no finish stop");
+        if(m->left*m->right<0) m->left=m->right=0;
+        m->armed=false; m->clear_since=now; m->wide_since=0;
+        pid_reset(m); l=r=30; goto drive;
+    }
+    if(m->state==MAZE_SETTLE) {
+        m->left=m->right=0;
+        if(instant>0 && count>0) enter(m,MAZE_FOLLOW,now,"White returned before search");
+        else if(now-m->since>=30) enter(m,MAZE_SEARCH,now,"No white: continuous left search");
+        goto done;
+    }
+    if(m->state==MAZE_SEARCH) {
+        l=-c->turn; r=c->turn;
+        // Do not resume just because an outer sensor grazes the line.
+        m->hits=(normal || count==5) && instant>0 ? m->hits+1 : 0;
+        if(m->hits>=3) {
+            m->left=m->right=0; m->armed=false; m->clear_since=now;
+            enter(m,MAZE_FOLLOW,now,"White centred: resume forward");
+            goto done;
+        }
+        goto drive;
+    }
+    if(m->state==MAZE_TURN_LEFT || m->state==MAZE_TURN_RIGHT) {
+        bool turn_left=m->state==MAZE_TURN_LEFT;
+        l=turn_left ? -c->turn : c->turn; r=-l;
+        if(!centre) m->left_old_line=true;
+        m->hits=(m->left_old_line && normal && now-m->since>=60) ? m->hits+1 : 0;
+        if(m->hits>=3) {
+            m->left=m->right=0; m->armed=false; m->clear_since=now;
+            enter(m,MAZE_FOLLOW,now,"Turn aligned with white line");
+            goto done;
+        }
+        if(now-m->since>=1400) {
+            enter(m,MAZE_SEARCH,now,"Turn not aligned: continue searching left");
+            l=-c->turn; r=c->turn;
+        }
+        goto drive;
+    }
+    if(m->state==MAZE_INSPECT) {
+        m->left_seen|=left; m->right_seen|=right;
+        l=r=30;
+        if(now-m->since >= (uint32_t)c->cross_ms) {
+            bool straight=m->white_bits[1]||centre||m->white_bits[3];
+            if(m->left_seen) enter(m,MAZE_TURN_LEFT,now,"Junction priority: LEFT");
+            else if(straight) enter(m,MAZE_FOLLOW,now,"No left branch: STRAIGHT");
+            else if(m->right_seen) enter(m,MAZE_TURN_RIGHT,now,"No left/straight: RIGHT");
+            else enter(m,MAZE_SEARCH,now,"Dead end: search left toward return line");
+            m->armed=false; m->clear_since=now; m->left=m->right=0;
+            goto done;
+        }
+        goto drive;
+    }
+    if(!m->armed) {
+        if(wide) m->clear_since=now;
+        else if(now-m->clear_since>=80) m->armed=true;
+    }
+    if(wide && m->armed) {
+        if(!m->wide_since) { m->wide_since=now; m->left_seen=left; m->right_seen=right; }
+        m->left_seen|=left; m->right_seen|=right;
+        if(now-m->wide_since>=20) {
+            enter(m,MAZE_INSPECT,now,"Wide pattern confirmed: inspecting branches");
+            m->wide_since=0; l=r=30; goto drive;
+        }
+    } else m->wide_since=0;
+    if((left||right)&&!centre&&count<=2&&!(left&&right)) {
+        maze_state_t next=left ? MAZE_SHARP_LEFT : MAZE_SHARP_RIGHT;
+        if(m->state!=next) enter(m,next,now,"Edge line: pivot through sharp corner");
+        l=left ? -25 : c->turn; r=left ? c->turn : -25;
+        goto drive;
+    }
+    if(m->state!=MAZE_FOLLOW || !strcmp(m->reason,"All white: straight, no finish stop"))
+        enter(m,MAZE_FOLLOW,now,"Tracking white line");
+    m->integral=clamp(m->integral+m->error,-30,30);
+    m->derivative=.6f*m->derivative+.4f*(m->error-m->previous);
+    float correction=c->kp*m->error+c->ki*m->integral+c->kd*m->derivative;
+    m->previous=m->error;
+    float base=clamp(c->cruise-.2f*fabsf(m->error),28,c->cruise);
+    l=clamp(base+correction,0,60); r=clamp(base-correction,0,60);
+drive:
+    m->left=slew(m->left,l); m->right=slew(m->right,r);
+done:
+    out->left=m->left; out->right=m->right; out->state=m->state;
+    out->error=m->error; out->sequence=m->sequence;
+    snprintf(out->reason,sizeof(out->reason),"%s",m->reason ? m->reason : "");
+}
