@@ -1,0 +1,38 @@
+menu "Maze solver"
+config MAZE_STA_SSID
+    string "Optional router SSID (blank = dashboard AP only)"
+    default ""
+config MAZE_STA_PASSWORD
+    string "Router password"
+    default ""
+config MAZE_REVERSE_SENSORS
+    bool "Reverse physical LSA order"
+    default n
+config MAZE_REVERSE_LEFT
+    bool "Reverse left motor direction"
+    default n
+config MAZE_REVERSE_RIGHT
+    bool "Reverse right motor direction"
+    default n
+config MAZE_SWAP_MOTORS
+    bool "Swap left and right motor connectors"
+    default n
+config MAZE_OLED
+    bool "SSD1306 128x64 OLED on GPIO21/22, address 0x3c"
+    default y
+config MAZE_LAUNCH_MS
+    int "Initial forward launch (ms)"
+    range 0 1000
+    default 300
+config MAZE_CROSS_MS
+    int "Junction sensor-to-axle advance (ms)"
+    range 20 400
+    default 120
+config MAZE_FINISH_CONFIRM_MS
+    int "All-white finish confirmation (ms, 0 disables)"
+    range 0 3000
+    default 600
+    help
+        Crawl at 25 percent while all five sensors see white, then stop until
+        reset. Tune above crossing duration but below time to leave the box.
+endmenu
