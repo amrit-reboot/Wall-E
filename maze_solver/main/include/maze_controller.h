@@ -18,8 +18,8 @@ typedef struct {
 } maze_config_t;
 typedef struct {
     maze_state_t state;
-    uint32_t since, lost_since, wide_since, clear_since;
-    bool initialized, armed, left_seen, right_seen, left_old_line;
+    uint32_t last_step, since, lost_since, wide_since, clear_since;
+    bool pid_ready, initialized, armed, left_seen, right_seen, left_old_line;
     bool white_bits[5];
     unsigned hits;
     float filtered[5], error, previous, integral, derivative, left, right;

@@ -6,7 +6,7 @@
 
 static float clamp(float x, float lo, float hi) { return fminf(hi, fmaxf(lo, x)); }
 static void pid_reset(maze_controller_t *m)
-{ m->previous = m->integral = m->derivative = 0; }
+{ m->previous = m->integral = m->derivative = 0; m->pid_ready=false; }
 static void enter(maze_controller_t *m, maze_state_t s, uint32_t now, const char *reason)
 {
     m->state = s; m->since = now; m->reason = reason; m->sequence++;
@@ -22,10 +22,10 @@ const char *maze_state_name(maze_state_t s)
 }
 maze_config_t maze_defaults(void)
 {
-    return (maze_config_t){.kp=.9f, .ki=0, .kd=6.5f,
+    return (maze_config_t){.kp=.65f, .ki=0, .kd=1.8f,
         .black={4095,4095,4095,4095,4095}, .white={0,0,0,0,0},
-        .threshold=820, .hysteresis=20, .launch_ms=300, .cross_ms=120,
-        .cruise=40, .turn=35};
+        .threshold=775, .hysteresis=25, .launch_ms=300, .cross_ms=120,
+        .cruise=48, .turn=35};
 }
 bool maze_config_valid(const maze_config_t *c)
 {
@@ -45,27 +45,34 @@ void maze_init(maze_controller_t *m, uint32_t now)
     memset(m, 0, sizeof(*m)); m->armed=true;
     enter(m, MAZE_LAUNCH, now, "Initial forward launch");
 }
-static float slew(float old, float target)
+static float slew(float old, float target, float loops)
 {
-    // Pass through zero before reversing. At nominal 10 ms, 4% per tick.
+    // Pass through zero before reversing. At nominal 10 ms, 3% per nominal tick.
     if (old*target < 0) target=0;
-    return old + clamp(target-old, -4, 4);
+    return old + clamp(target-old, -3*loops, 3*loops);
 }
 void maze_step(maze_controller_t *m, const maze_config_t *c, const int raw[5],
                uint32_t now, bool paused, maze_sample_t *out)
 {
     memset(out,0,sizeof(*out)); out->ms=now; out->ready=true;
+    uint32_t elapsed=m->initialized ? now-m->last_step : 10;
+    float loops=clamp((float)elapsed/10.0f,.1f,5.0f);
+    m->last_step=now;
+    float sensor_alpha=1.0f-powf(.4f,loops);
     int count=0, instant=0;
     float sum=0, weighted=0;
     static const float weights[5]={-50,-25,0,25,50};
     for (int i=0;i<5;i++) {
         float strength=clamp(1000.0f*(raw[i]-c->black[i])/(c->white[i]-c->black[i]),0,1000);
         if (strength >= c->threshold-c->hysteresis) instant++;
-        m->filtered[i]=m->initialized ? .4f*m->filtered[i]+.6f*strength : strength;
+        m->filtered[i]=m->initialized ? m->filtered[i]+sensor_alpha*(strength-m->filtered[i]) : strength;
         float boundary=c->threshold+(m->white_bits[i] ? -c->hysteresis : c->hysteresis);
         m->white_bits[i]=m->filtered[i]>=boundary;
         out->raw[i]=raw[i]; out->values[i]=(int)m->filtered[i];
-        if(m->white_bits[i]) { count++; out->bits|=1<<i; sum+=m->filtered[i]; weighted+=weights[i]*m->filtered[i]; }
+        if(m->white_bits[i]) { count++; out->bits|=1<<i; }
+        // Include partial line coverage without pulling toward the dark background.
+        float signal=fmaxf(0,m->filtered[i]-(c->threshold-3*c->hysteresis));
+        sum+=signal; weighted+=weights[i]*signal;
     }
     m->initialized=true; out->count=count;
     if (sum>0) m->error=weighted/sum;
@@ -173,14 +180,21 @@ void maze_step(maze_controller_t *m, const maze_config_t *c, const int raw[5],
     }
     if(m->state!=MAZE_FOLLOW || !strcmp(m->reason,"All white: straight, no finish stop"))
         enter(m,MAZE_FOLLOW,now,"Tracking white line");
-    m->integral=clamp(m->integral+m->error,-30,30);
-    m->derivative=.6f*m->derivative+.4f*(m->error-m->previous);
-    float correction=c->kp*m->error+c->ki*m->integral+c->kd*m->derivative;
-    m->previous=m->error;
-    float base=clamp(c->cruise-.2f*fabsf(m->error),28,c->cruise);
+    // Seed after turns/pause so re-entry cannot generate a derivative kick.
+    float error=fabsf(m->error)<.7f ? 0 : m->error;
+    if(!m->pid_ready) { m->previous=error; m->pid_ready=true; }
+    float alpha=1.0f-powf(.75f,loops);
+    m->derivative+=alpha*((error-m->previous)/loops-m->derivative);
+    m->previous=error;
+    float base=clamp(c->cruise-.35f*fabsf(error)-.8f*fabsf(m->derivative),25,c->cruise);
+    float limit=fminf(base,60-base);
+    float candidate=clamp(m->integral+error*loops,-30,30);
+    float requested=c->kp*error+c->ki*candidate+c->kd*m->derivative;
+    if(fabsf(requested)<=limit || requested*error<0) m->integral=candidate;
+    float correction=clamp(c->kp*error+c->ki*m->integral+c->kd*m->derivative,-limit,limit);
     l=clamp(base+correction,0,60); r=clamp(base-correction,0,60);
 drive:
-    m->left=slew(m->left,l); m->right=slew(m->right,r);
+    m->left=slew(m->left,l,loops); m->right=slew(m->right,r,loops);
 done:
     out->left=m->left; out->right=m->right; out->state=m->state;
     out->error=m->error; out->sequence=m->sequence;

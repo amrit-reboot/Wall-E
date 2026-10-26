@@ -58,7 +58,7 @@ are starting values, not measured calibration of your particular LSA.
 ## Behaviour
 
 - White strength is normalized separately per sensor (0 black, 1000 white),
-  filtered, then classified with hysteresis (default on 840, off below 800).
+  filtered, then classified with hysteresis (default on 800, off below 750).
 - Normal PID uses symmetric sensor weights, derivative filtering, limited
   integral, corner slowdown and 4 percentage-point command ramps per 10 ms tick.
 - At a confirmed edge-only corner, the inside wheel reverses for a tight turn.
@@ -118,8 +118,8 @@ not block control. The AP remains available when a router is configured, and
 router reconnection handlers remain registered. AP channel may follow the router.
 
 Tune junction advance on the actual sensor-to-axle distance; 120 ms is an initial
-guess. Pivot duty must overcome motor friction. Start with cruise 40%, pivot 35%,
-Kp 0.9, Ki 0 and Kd 6.5, then tune on track. Saved configuration takes precedence
+guess. Pivot duty must overcome motor friction. Start with cruise 48%, pivot 35%,
+Kp 0.65, Ki 0 and Kd 1.8, then tune on track. Saved configuration takes precedence
 over compiled defaults; `idf.py -p COM3 erase-flash` clears it if a full reset is
 intended (and erases all other flash contents).
 
@@ -138,3 +138,29 @@ alignment, pause/resume, all-white behaviour, sharp turns, junction priorities,
 turn timeout, transient patterns, symmetric error, invalid calibration/settings
 and all 32 binary sensor patterns. These do not substitute for tests on a robot.
 See `VALIDATION.md` for the actual build and dashboard checks performed.
+
+
+## Smoother map tuning (27 October 2026)
+
+The baseline assumes the reported black 500–700 and white 850–990 are the
+normalized dashboard readings, **not raw 12-bit ADC readings**. Threshold 775
+with hysteresis 25 classifies white at 800 and clears it below 750. If those
+numbers are raw ADC values instead, pause and capture black and white using the
+dashboard calibration before running. Check each of the five sensors.
+
+Steering now uses continuous partial sensor coverage above the background floor,
+filtered derivative with elapsed-time compensation, no derivative kick after a
+turn, and bounded correction with anti-windup. Cruise increases from 40% to 48%
+on centered straights; bends slow automatically. PWM remains capped at 60%, and
+acceleration is limited to 3 percentage points per nominal 10 ms. Startup,
+junction inspection, all-white speed and pivot duty remain conservative.
+
+The first boot with this version uses new tuning defaults while retaining valid
+v1 black/white calibration. Subsequent dashboard changes save under config_v2.
+The existing left-first junction, loss-of-line stop/search and pause behavior
+are retained. No object detection or automatic color inversion was added.
+
+Test first with wheels lifted to confirm motor direction, then on a straight
+white line and sharp corners. These are starting gains, not hardware-verified
+optimal gains. If trembling persists, reduce cruise to 40 and Kp in steps of
+0.05; check sensor height, caster freedom, wheel grip and battery voltage.

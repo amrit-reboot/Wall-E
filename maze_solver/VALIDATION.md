@@ -1,3 +1,11 @@
+# Tuning revision — 27 October 2026
+
+The firmware build results below apply to the earlier revision, not this tuning
+change. This environment has no ESP-IDF compiler, and no physical bot is attached.
+The tuning revision was checked with host controller tests, including map range
+extremes, noisy center readings, partial analog coverage and variable loop timing.
+Full ESP-IDF build/flash and physical track tuning remain required.
+
 # Validation — 25 October 2026
 
 ## Firmware

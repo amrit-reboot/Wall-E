@@ -32,7 +32,7 @@ static bool save_config(const maze_config_t *c)
     if(!nvs_ready) return false;
     nvs_handle_t h;
     if(nvs_open("maze",NVS_READWRITE,&h)!=ESP_OK) return false;
-    esp_err_t e=nvs_set_blob(h,"config_v1",c,sizeof(*c));
+    esp_err_t e=nvs_set_blob(h,"config_v2",c,sizeof(*c));
     if(e==ESP_OK) e=nvs_commit(h);
     nvs_close(h); return e==ESP_OK;
 }
@@ -50,8 +50,15 @@ void maze_shared_init(void)
         nvs_handle_t h;
         if(nvs_open("maze",NVS_READONLY,&h)==ESP_OK) {
             maze_config_t stored; size_t n=sizeof(stored);
-            if(nvs_get_blob(h,"config_v1",&stored,&n)==ESP_OK && n==sizeof(stored) && maze_config_valid(&stored))
+            if(nvs_get_blob(h,"config_v2",&stored,&n)==ESP_OK && n==sizeof(stored) && maze_config_valid(&stored)) {
                 settings=stored;
+            } else {
+                n=sizeof(stored);
+                if(nvs_get_blob(h,"config_v1",&stored,&n)==ESP_OK && n==sizeof(stored) && maze_config_valid(&stored)) {
+                    memcpy(settings.black,stored.black,sizeof(settings.black));
+                    memcpy(settings.white,stored.white,sizeof(settings.white));
+                }
+            }
             nvs_close(h);
         }
     }

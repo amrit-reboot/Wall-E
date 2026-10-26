@@ -63,6 +63,43 @@ int main(void)
     fresh(); repeat(2,10); float negative=s.error;
     fresh(); repeat(8,10); assert(fabsf(negative+s.error)<.01f); // Symmetric position.
 
+    // Reported map range is the dashboard's normalized 0..1000 scale.
+    // Exercise every black/white extreme through the actual ADC conversion.
+    for(int black=500;black<=700;black+=200) {
+        for(int white=850;white<=990;white+=140) {
+            fresh();
+            for(int t=0;t<100;t++) {
+                int raw[5];
+                for(int i=0;i<5;i++) raw[i]=(1000-(i==2 ? white : black))*4095/1000;
+                maze_step(&m,&c,raw,now,false,&s); now+=10;
+                assert(s.state==MAZE_FOLLOW && s.bits==4);
+                assert(fabsf(s.left-s.right)<.01f);
+            }
+            assert(fabsf(s.left-48)<.01f);
+        }
+    }
+    // Small brightness noise must not cause stop/start or alternating hard turns.
+    fresh();
+    for(int t=0;t<200;t++) {
+        int values[5]={650,710+(t%7),900+(t%11),710+(t%5),650};
+        int raw[5];
+        for(int i=0;i<5;i++) raw[i]=(1000-values[i])*4095/1000;
+        maze_step(&m,&c,raw,now,false,&s); now+=t%2 ? 10 : 20;
+        assert(s.state==MAZE_FOLLOW && s.left>40 && s.right>40);
+        assert(fabsf(s.left-s.right)<5);
+    }
+    // Subthreshold partial coverage influences position continuously.
+    fresh();
+    int partial[5]={2047,1024,410,1228,2047};
+    for(int t=0;t<20;t++) { maze_step(&m,&c,partial,now,false,&s); now+=10; }
+    assert(s.bits==4 && s.error< -1 && s.error> -15);
+    assert(s.left<s.right);
+    // Timing-aware acceleration: 20 ms permits twice the 10 ms ramp.
+    c=maze_defaults(); maze_init(&m,0);
+    int centre_raw[5]={4095,4095,0,4095,4095};
+    maze_step(&m,&c,centre_raw,0,false,&s); float initial=s.left;
+    maze_step(&m,&c,centre_raw,20,false,&s); assert(fabsf(s.left-initial-6)<.01f);
+
     for(unsigned bits=0;bits<32;bits++) { fresh(); repeat(bits,200); }
     // Per-sensor calibration supports either electrical polarity, and rejects no contrast.
     c=maze_defaults(); c.white[0]=4095; c.black[0]=0; assert(maze_config_valid(&c));
