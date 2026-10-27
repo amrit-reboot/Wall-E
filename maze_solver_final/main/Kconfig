@@ -1,0 +1,61 @@
+menu "Wall-E Configuration"
+
+menu "WiFi Config"
+    config WIFI_SSID
+        string "WiFi SSID"
+        default "myssid"
+        help
+            SSID (network name) for the example to connect to.
+
+    config WIFI_PASSWORD
+        string "WiFi Password"
+        default "mypassword"
+        help
+            WiFi password (WPA or WPA2) for the example to use.
+
+    config MAXIMUM_RETRY
+        int "Maximum retry"
+        default 5
+        help
+            Set the Maximum retry to avoid station reconnecting to the AP unlimited when the AP is really inexistent.
+endmenu
+
+menu "mDNS Config"
+    config MDNS_HOST_NAME
+        string "mDNS host name (< 15 chars)"
+        default "walle-tuning"
+        help
+            mDNS hostname used to access the tuning webpage, it should be less than 15 chars
+endmenu
+
+menu "Final maze solver"
+config FINAL_BASE_DUTY
+    int "Cruise duty"
+    range 20 50
+    default 32
+config FINAL_MAX_DUTY
+    int "Maximum following duty (at least cruise duty)"
+    range FINAL_BASE_DUTY 50
+    default 36
+config FINAL_TURN_DUTY
+    int "Pivot duty"
+    range 20 50
+    default 50
+config FINAL_EXIT_RULE
+    int "Exit priority: 0 straight, 1 right, 2 left"
+    range 0 2
+    default 0
+config FINAL_NODE_MEMORY
+    int "Straight-first node backtracking: 0 off, 1 on"
+    range 0 1
+    default 0
+config FINAL_IR_ENABLED
+    int "Front IR on GPIO27: 0 disconnected, 1 enabled"
+    range 0 1
+    default 0
+config FINAL_WHITE_BOUNDARY
+    int "White threshold (normalized 0-1000)"
+    range 1 999
+    default 820
+endmenu
+endmenu

@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.22)
+set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../components")
+if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/../components/sra-board-component/CMakeLists.txt")
+    message(FATAL_ERROR "Initialize dependencies: git submodule update --init --recursive")
+endif()
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(walle_maze_final)
