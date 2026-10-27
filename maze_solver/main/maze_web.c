@@ -32,7 +32,7 @@ static bool save_config(const maze_config_t *c)
     if(!nvs_ready) return false;
     nvs_handle_t h;
     if(nvs_open("maze",NVS_READWRITE,&h)!=ESP_OK) return false;
-    esp_err_t e=nvs_set_blob(h,"config_v2",c,sizeof(*c));
+    esp_err_t e=nvs_set_blob(h,"config_v3",c,sizeof(*c));
     if(e==ESP_OK) e=nvs_commit(h);
     nvs_close(h); return e==ESP_OK;
 }
@@ -50,16 +50,28 @@ void maze_shared_init(void)
         nvs_handle_t h;
         if(nvs_open("maze",NVS_READONLY,&h)==ESP_OK) {
             maze_config_t stored; size_t n=sizeof(stored);
-            if(nvs_get_blob(h,"config_v2",&stored,&n)==ESP_OK && n==sizeof(stored) && maze_config_valid(&stored)) {
+            bool migrated=false;
+            if(nvs_get_blob(h,"config_v3",&stored,&n)==ESP_OK && n==sizeof(stored) && maze_config_valid(&stored)) {
                 settings=stored;
             } else {
+                migrated=true;
                 n=sizeof(stored);
-                if(nvs_get_blob(h,"config_v1",&stored,&n)==ESP_OK && n==sizeof(stored) && maze_config_valid(&stored)) {
-                    memcpy(settings.black,stored.black,sizeof(settings.black));
-                    memcpy(settings.white,stored.white,sizeof(settings.white));
+                if(nvs_get_blob(h,"config_v2",&stored,&n)==ESP_OK && n==sizeof(stored) && maze_config_valid(&stored)) {
+                    // Apply the faster profile once; retain calibration and PID tuning.
+                    maze_config_t faster=maze_defaults();
+                    settings=stored;
+                    settings.cruise=faster.cruise; settings.turn=faster.turn;
+                    settings.cross_ms=CONFIG_MAZE_CROSS_MS;
+                } else {
+                    n=sizeof(stored);
+                    if(nvs_get_blob(h,"config_v1",&stored,&n)==ESP_OK && n==sizeof(stored) && maze_config_valid(&stored)) {
+                        memcpy(settings.black,stored.black,sizeof(settings.black));
+                        memcpy(settings.white,stored.white,sizeof(settings.white));
+                    }
                 }
             }
             nvs_close(h);
+            if(migrated) save_config(&settings);
         }
     }
 }
@@ -266,3 +278,4 @@ void maze_web_start(void)
         if(e!=ESP_OK) ESP_LOGE("maze_web","Route registration failed: %s",esp_err_to_name(e));
     }
 }
+

@@ -27,7 +27,7 @@ config MAZE_LAUNCH_MS
 config MAZE_CROSS_MS
     int "Junction sensor-to-axle advance (ms)"
     range 20 400
-    default 120
+    default 80
 config MAZE_FINISH_CONFIRM_MS
     int "All-white finish confirmation (ms, 0 disables)"
     range 0 3000
@@ -36,3 +36,4 @@ config MAZE_FINISH_CONFIRM_MS
         Crawl at 25 percent while all five sensors see white, then stop until
         reset. Tune above crossing duration but below time to leave the box.
 endmenu
+

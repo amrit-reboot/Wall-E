@@ -1,5 +1,32 @@
 # Wall-E maze solver
 
+## Faster response profile (27 October 2026)
+
+Current defaults are **54% cruise, 42% pivot**, with the existing 60% wheel cap.
+Startup uses 35%; junction inspection uses 40% for a default 80 ms advance
+(previously 30% for 120 ms). Tune that advance to the sensor-to-axle distance.
+Acceleration is 6 duty points per 10 ms, deceleration 10, with zero crossed before
+reversal. Line loss immediately stops forward movement; the settle interval is
+20 ms. Junction re-arming takes 60 ms of clear track. The 20 ms branch filter and
+three centred readings for turn alignment remain in place.
+
+Steering now reduces the common base when necessary to preserve differential
+correction at high cruise duty. Raising cruise to 60 no longer removes steering
+authority. These percentages are PWM commands, not measured speed gains.
+
+On first upgrade, saved `config_v2` settings migrate to `config_v3`: calibration,
+PID and thresholds are retained; cruise/pivot use the new profile and junction
+advance uses menuconfig. Later dashboard adjustments are saved normally. Existing
+`sdkconfig` files can retain the old 120 ms advance: run `idf.py menuconfig`,
+open **Maze solver**, and set **Junction sensor-to-axle advance** to **80 ms**.
+No flash erase is required. Inversion and its 25%/600 ms white-box finish stop
+are unchanged in `maze_solver_inversion`.
+
+Host tests cover steering at maximum cruise, symmetric correction, faster branch
+selection, immediate line-loss stop, search, inversion and finish behaviour.
+Physical track tuning and an ESP-IDF firmware build are still required.
+
+
 Separate ESP-IDF **5.5.x**, classic **ESP32** firmware for the SRA normal-mode
 two-wheel board. Build from this directory. No Arduino, LVGL, downloaded managed
 components, SPIFFS image or SRA submodule is needed. The dashboard is embedded
@@ -164,3 +191,4 @@ Test first with wheels lifted to confirm motor direction, then on a straight
 white line and sharp corners. These are starting gains, not hardware-verified
 optimal gains. If trembling persists, reduce cruise to 40 and Kp in steps of
 0.05; check sensor height, caster freedom, wheel grip and battery voltage.
+

@@ -75,7 +75,7 @@ int main(void)
                 assert(s.state==MAZE_FOLLOW && s.bits==4);
                 assert(fabsf(s.left-s.right)<.01f);
             }
-            assert(fabsf(s.left-48)<.01f);
+            assert(fabsf(s.left-c.cruise)<.01f);
         }
     }
     // Small brightness noise must not cause stop/start or alternating hard turns.
@@ -98,7 +98,20 @@ int main(void)
     c=maze_defaults(); maze_init(&m,0);
     int centre_raw[5]={4095,4095,0,4095,4095};
     maze_step(&m,&c,centre_raw,0,false,&s); float initial=s.left;
-    maze_step(&m,&c,centre_raw,20,false,&s); assert(fabsf(s.left-initial-6)<.01f);
+    maze_step(&m,&c,centre_raw,20,false,&s); assert(fabsf(s.left-initial-12)<.01f);
+
+    // At maximum cruise, an offset line must still steer (old headroom was zero).
+    fresh(); c.cruise=60;
+    repeat(4,20); repeat(8,30);
+    assert(s.left-s.right>20 && s.left<=60 && s.right>=0);
+    float high_left=s.left, high_right=s.right;
+    fresh(); c.cruise=60; repeat(4,20); repeat(2,30);
+    assert(fabsf(s.left-high_right)<.01f && fabsf(s.right-high_left)<.01f);
+    // A sustained branch chooses left within 130 ms; single-read noise is covered above.
+    fresh(); repeat(7,13); assert(s.state==MAZE_TURN_LEFT);
+    // Line loss still cuts forward drive immediately, then starts pivoting within 30 ms.
+    fresh(); step(0,false); assert(s.left==0 && s.right==0);
+    repeat(0,3); assert(s.state==MAZE_SEARCH && s.left<0 && s.right>0);
 
     for(unsigned bits=0;bits<32;bits++) { fresh(); repeat(bits,200); }
     // Per-sensor calibration supports either electrical polarity, and rejects no contrast.
@@ -109,3 +122,4 @@ int main(void)
     puts("      left/straight/right priorities, turn timeout, noise, symmetry and all 32 LSA patterns");
     return 0;
 }
+

@@ -27,5 +27,6 @@ config MAZE_LAUNCH_MS
 config MAZE_CROSS_MS
     int "Junction sensor-to-axle advance (ms)"
     range 20 400
-    default 120
+    default 80
 endmenu
+

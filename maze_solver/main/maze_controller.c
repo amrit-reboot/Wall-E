@@ -24,8 +24,8 @@ maze_config_t maze_defaults(void)
 {
     return (maze_config_t){.kp=.65f, .ki=0, .kd=1.8f,
         .black={4095,4095,4095,4095,4095}, .white={0,0,0,0,0},
-        .threshold=775, .hysteresis=25, .launch_ms=300, .cross_ms=120,
-        .cruise=48, .turn=35};
+        .threshold=775, .hysteresis=25, .launch_ms=300, .cross_ms=80,
+        .cruise=54, .turn=42};
 }
 bool maze_config_valid(const maze_config_t *c)
 {
@@ -47,9 +47,10 @@ void maze_init(maze_controller_t *m, uint32_t now)
 }
 static float slew(float old, float target, float loops)
 {
-    // Pass through zero before reversing. At nominal 10 ms, 3% per nominal tick.
+    // Pass through zero before reversing; accelerate 6 and decelerate 10 duty points per 10 ms.
     if (old*target < 0) target=0;
-    return old + clamp(target-old, -3*loops, 3*loops);
+    float rate=fabsf(target)<fabsf(old) ? 10.0f : 6.0f;
+    return old + clamp(target-old, -rate*loops, rate*loops);
 }
 void maze_step(maze_controller_t *m, const maze_config_t *c, const int raw[5],
                uint32_t now, bool paused, maze_sample_t *out)
@@ -101,7 +102,7 @@ void maze_step(maze_controller_t *m, const maze_config_t *c, const int raw[5],
         goto done;
     }
     if(m->state==MAZE_LAUNCH) {
-        if(now-m->since < (uint32_t)c->launch_ms) { l=r=30; goto drive; }
+        if(now-m->since < (uint32_t)c->launch_ms) { l=r=35; goto drive; }
         enter(m,instant ? MAZE_FOLLOW : MAZE_SETTLE,now,"Startup launch complete");
     }
     // An actual all-white area overrides a pivot/search as well as normal following.
@@ -116,7 +117,7 @@ void maze_step(maze_controller_t *m, const maze_config_t *c, const int raw[5],
     if(m->state==MAZE_SETTLE) {
         m->left=m->right=0;
         if(instant>0 && count>0) enter(m,MAZE_FOLLOW,now,"White returned before search");
-        else if(now-m->since>=30) enter(m,MAZE_SEARCH,now,"No white: continuous left search");
+        else if(now-m->since>=20) enter(m,MAZE_SEARCH,now,"No white: continuous left search");
         goto done;
     }
     if(m->state==MAZE_SEARCH) {
@@ -148,7 +149,7 @@ void maze_step(maze_controller_t *m, const maze_config_t *c, const int raw[5],
     }
     if(m->state==MAZE_INSPECT) {
         m->left_seen|=left; m->right_seen|=right;
-        l=r=30;
+        l=r=40;
         if(now-m->since >= (uint32_t)c->cross_ms) {
             bool straight=m->white_bits[1]||centre||m->white_bits[3];
             if(m->left_seen) enter(m,MAZE_TURN_LEFT,now,"Junction priority: LEFT");
@@ -162,14 +163,14 @@ void maze_step(maze_controller_t *m, const maze_config_t *c, const int raw[5],
     }
     if(!m->armed) {
         if(wide) m->clear_since=now;
-        else if(now-m->clear_since>=80) m->armed=true;
+        else if(now-m->clear_since>=60) m->armed=true;
     }
     if(wide && m->armed) {
         if(!m->wide_since) { m->wide_since=now; m->left_seen=left; m->right_seen=right; }
         m->left_seen|=left; m->right_seen|=right;
         if(now-m->wide_since>=20) {
             enter(m,MAZE_INSPECT,now,"Wide pattern confirmed: inspecting branches");
-            m->wide_since=0; l=r=30; goto drive;
+            m->wide_since=0; l=r=40; goto drive;
         }
     } else m->wide_since=0;
     if((left||right)&&!centre&&count<=2&&!(left&&right)) {
@@ -187,11 +188,14 @@ void maze_step(maze_controller_t *m, const maze_config_t *c, const int raw[5],
     m->derivative+=alpha*((error-m->previous)/loops-m->derivative);
     m->previous=error;
     float base=clamp(c->cruise-.35f*fabsf(error)-.8f*fabsf(m->derivative),25,c->cruise);
-    float limit=fminf(base,60-base);
+    // Reserve steering authority even near the cruise ceiling. Slow the
+    // common base when needed so neither wheel clips the differential.
+    float limit=30;
     float candidate=clamp(m->integral+error*loops,-30,30);
     float requested=c->kp*error+c->ki*candidate+c->kd*m->derivative;
     if(fabsf(requested)<=limit || requested*error<0) m->integral=candidate;
     float correction=clamp(c->kp*error+c->ki*m->integral+c->kd*m->derivative,-limit,limit);
+    base=fminf(base,60-fabsf(correction));
     l=clamp(base+correction,0,60); r=clamp(base-correction,0,60);
 drive:
     m->left=slew(m->left,l,loops); m->right=slew(m->right,r,loops);
@@ -200,3 +204,4 @@ done:
     out->error=m->error; out->sequence=m->sequence;
     snprintf(out->reason,sizeof(out->reason),"%s",m->reason ? m->reason : "");
 }
+
