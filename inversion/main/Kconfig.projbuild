@@ -14,11 +14,23 @@ config INV_SWAP_MOTORS
 config INV_CRUISE
     int "Cruise duty percent"
     range 20 60
-    default 42
+    default 50
 config INV_CREEP
     int "Transition / ambiguity duty percent"
     range 15 50
-    default 32
+    default 45
+config INV_MIN_DUTY
+    int "Minimum running duty percent (existing speed settings are raised to this)"
+    range 0 60
+    default 45
+config INV_START_DUTY
+    int "Startup boost duty percent"
+    range 0 60
+    default 55
+config INV_START_MS
+    int "Startup boost duration (ms)"
+    range 0 300
+    default 120
 config INV_CONFIRM_MS
     int "Continuous opposite-line confirmation (ms)"
     range 10 100

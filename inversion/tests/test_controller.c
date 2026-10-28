@@ -22,6 +22,22 @@ static const int black_line[5]={1000,1000,0,1000,1000};
 
 int main(void)
 {
+    reset(); sample(white_line);
+    assert(o.left==55 && o.right==55); /* Starts above stiction immediately. */
+    repeat(white_line,30); assert(o.left==50 && o.right==50);
+    /* Existing sdkconfig cruise=42 must not retain the stall-prone output. */
+    reset(); cfg.cruise=42; cfg.creep=32;
+    repeat(white_line,30); assert(o.left==45 && o.right==45);
+    const int slightly_right[5]={0,0,900,700,0};
+    repeat(slightly_right,30);
+    assert(o.left>o.right && o.right>=45); /* Preserve small corrections. */
+    uint32_t started=c.motion_since;
+    repeat(black_line,3); assert(o.switched && c.motion_since==started);
+    /* A waiting wrapper can suppress and rearm the startup pulse. */
+    reset(); sample(white_line);
+    c.motion_started=false; c.left=c.right=0;
+    now+=1000; sample(white_line); assert(o.left==55 && o.right==55);
+
     reset(); repeat(white_line,30);
     assert(o.valid_line && !o.black_line && o.switches==0);
     assert(fabsf(o.position)<0.001f && o.left==o.right);

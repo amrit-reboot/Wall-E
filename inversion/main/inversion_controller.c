@@ -7,8 +7,9 @@ static float clip(float v, float lo, float hi)
 
 inv_config_t inv_default_config(void)
 {
-    return (inv_config_t){.cruise=42, .creep=32, .maximum=60,
-        .search_duty=38, .kp=14, .kd=0.10f, .derivative_tau=0.04f,
+    return (inv_config_t){.cruise=50, .creep=45, .maximum=60,
+        .search_duty=50, .minimum=45, .start_duty=55, .start_ms=120,
+        .kp=14, .kd=0.10f, .derivative_tau=0.04f,
         .slew_per_second=250, .confirm_ms=20, .bridge_ms=120,
         .stop_ms=1500, .black_max=350, .white_min=650};
 }
@@ -77,6 +78,29 @@ static bool position(const inv_controller_t *c, const int b[5], float *p)
 static void drive(inv_controller_t *c, const inv_config_t *cfg,
                   float left, float right, float dt, inv_output_t *o)
 {
+    bool first=!c->motion_started;
+    if(first) { c->motion_started=true; c->motion_since=c->last_ms; }
+    float floor=cfg->minimum;
+    if(c->last_ms-c->motion_since<cfg->start_ms)
+        floor=fmaxf(floor,cfg->start_duty);
+    floor=clip(floor,0,cfg->maximum);
+    /* Shift same-direction targets together, preserving small steering
+     * differences instead of clamping both wheels to the same minimum. */
+    if(left>=0 && right>=0) {
+        float shift=fmaxf(0,floor-fminf(left,right));
+        left+=shift; right+=shift;
+    } else if(left<=0 && right<=0) {
+        float shift=fmaxf(0,floor-fminf(-left,-right));
+        left-=shift; right-=shift;
+    } else {
+        left=copysignf(fmaxf(fabsf(left),floor),left);
+        right=copysignf(fmaxf(fabsf(right),floor),right);
+    }
+    left=clip(left,-cfg->maximum,cfg->maximum);
+    right=clip(right,-cfg->maximum,cfg->maximum);
+    /* Static friction needs an actual initial pulse, not a ramp through a
+     * prolonged stall. Arming suppresses this output and resets this flag. */
+    if(first) { c->left=left; c->right=right; }
     float step=cfg->slew_per_second*dt;
     c->left+=clip(left-c->left,-step,step);
     c->right+=clip(right-c->right,-step,step);

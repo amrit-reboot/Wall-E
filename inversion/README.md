@@ -95,11 +95,32 @@ number of rectangles are not encoded in the program.
 
 ## Tuning and physical limits
 
-Start at 42% cruise, 32% creep, Kp=14 and Kd=0.10 (derivative uses seconds).
+Defaults are 50% cruise, 45% creep, a 45% minimum running target, and a 55%
+startup boost for 120 ms. Kp=14 and Kd=0.10 (derivative uses seconds).
 These are initial tuning values, not measured speed or a guarantee that your
 motors will move at every commanded duty. Adjust in menuconfig for battery,
 motor friction and sensor height. The main loop is 10 ms. Other controller
 parameters and documented units are in `inv_default_config()`.
+
+If the log says FOLLOW with nonzero L/R but the wheels do not move, the log
+reports commands, not measured wheel motion. The original 37-44% commands may
+stall loaded motors. Startup now immediately applies the boost instead of
+slowly ramping through the stall region. Same-direction targets are shifted
+together to respect the minimum while preserving steering differences; both
+remain capped at 60%. The minimum applies to targets: slew limiting can pass
+through smaller values briefly during direction changes.
+
+With the robot supported and both wheels clear of the surface, enable motor
+battery power and send `t` + Enter. This commands both motors at 55% for only
+500 ms, then stops automatically. `x` stops early. It does not require calibration
+or line detection. Check whether both wheels turn and whether their forward
+directions match. If neither turns, inspect motor supply, battery, normal-mode
+jumper configuration and motor connections; a FOLLOW log cannot verify them.
+If only one turns, check that side. Direction/swap options are in menuconfig.
+
+For an existing build, old cruise/creep settings persist in `sdkconfig`. The
+new minimum and startup options take their defaults without erasing your
+configuration. You may set cruise=50 and creep=45 in menuconfig explicitly.
 
 A patch must remain under the array long enough to supply the confirmation
 samples, and its background must reach both outer sensors. Slow down or shorten
@@ -136,9 +157,12 @@ calibrated brightness readings and a monotonic millisecond timestamp to
 which module owns recovery and motor output, and suspend polarity decisions
 where the navigation state makes these patterns ambiguous.
 
-Validation in the authoring environment: host controller tests pass. ESP-IDF
-is not installed there, so a complete ESP32 firmware build and physical tests
-have **not** been performed. Run `idf.py build` with ESP-IDF 5.5.5 before flashing.
+Validation: the original firmware built and flashed on the user's ESP-IDF
+5.5.5 setup. Its supplied log reached FOLLOW and issued nonzero motor commands,
+but the user reported no motion. Host controller tests, including startup boost,
+minimum duty and retained steering, pass for this revision. ESP-IDF is not
+installed in the authoring environment, so this revision needs an ESP32 rebuild
+and physical validation. Run `idf.py build` before flashing.
 
 Board adapter derived from this repository's MIT-licensed `maze_board.c` on
 `final` at commit `7426ad5`; controller and standalone application are new.

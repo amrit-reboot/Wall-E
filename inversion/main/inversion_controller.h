@@ -8,8 +8,10 @@ typedef enum { INV_WAIT, INV_FOLLOW, INV_CONFIRM, INV_BRIDGE,
                INV_SEARCH, INV_STOPPED } inv_state_t;
 typedef struct {
     float cruise, creep, maximum, search_duty;
+    float minimum, start_duty;
     float kp, kd, derivative_tau, slew_per_second;
     uint32_t confirm_ms, bridge_ms, stop_ms;
+    uint32_t start_ms;
     int black_max, white_min;
 } inv_config_t;
 typedef struct {
@@ -26,6 +28,8 @@ typedef struct {
     float last_position, derivative, left, right;
     unsigned switches;
     bool stopped;
+    bool motion_started;
+    uint32_t motion_since;
 } inv_controller_t;
 inv_config_t inv_default_config(void);
 void inv_init(inv_controller_t *c, uint32_t now);

@@ -15,7 +15,7 @@ static void console_task(void *arg)
     (void)arg;
     for(;;) {
         int ch=getchar();
-        if(ch=='c' || ch=='g' || ch=='x') {
+        if(ch=='c' || ch=='g' || ch=='x' || ch=='t') {
             char command=(char)ch;
             xQueueSend(commands,&command,0);
         }
@@ -38,31 +38,41 @@ void app_main(void)
     inv_config_t cfg=inv_default_config();
     cfg.cruise=CONFIG_INV_CRUISE; cfg.creep=CONFIG_INV_CREEP;
     cfg.confirm_ms=CONFIG_INV_CONFIRM_MS;
+    cfg.minimum=CONFIG_INV_MIN_DUTY; cfg.start_duty=CONFIG_INV_START_DUTY;
+    cfg.start_ms=CONFIG_INV_START_MS;
     cfg.kp=CONFIG_INV_KP_X10/10.0f; cfg.kd=CONFIG_INV_KD_X1000/1000.0f;
     inv_controller_t controller;
     inv_init(&controller,now_ms());
     int low[5]={0}, high[5]={0};
     bool calibrating=false, calibrated=false, armed=false, running=false;
     bool stable_line=false;
+    bool testing=false;
+    uint32_t test_since=0;
     uint32_t calibration_start=0, line_since=0, last_log=0;
     TickType_t wake=xTaskGetTickCount();
     ESP_LOGI("inversion","c + Enter: calibrate; sweep EVERY sensor across black and white for %d ms, motors off",
              CONFIG_INV_CALIBRATION_MS);
     ESP_LOGI("inversion","g + Enter: arm/start on a line; x + Enter: stop. Calibration is required after every reset.");
+    ESP_LOGI("inversion","t + Enter: wheels-lifted motor test, 55%% for 500 ms; x stops early");
     for(;;) {
         uint32_t now=now_ms();
         char command;
         while(xQueueReceive(commands,&command,0)==pdTRUE) {
-            if(command=='x' || command=='c') {
+            if(command=='x' || command=='c' || command=='t') {
                 armed=running=stable_line=false;
+                testing=false;
                 inversion_board_stop(); inv_init(&controller,now);
                 calibrating=false;
             }
-            if(command=='c') {
+            if(command=='t') {
+                testing=true; test_since=now;
+                ESP_LOGW("inversion","MOTOR TEST: commanding both motors 55%% for 500 ms, independent of sensors");
+            } else if(command=='c') {
                 calibrated=false; calibrating=true; calibration_start=now;
                 for(int i=0;i<5;i++) { low[i]=INT_MAX; high[i]=0; }
                 ESP_LOGI("inversion","CALIBRATING: manually sweep all five sensors over BOTH surfaces at running height");
             } else if(command=='g') {
+                testing=false; inversion_board_stop();
                 if(!calibrated || calibrating) {
                     ESP_LOGW("inversion","Calibrate first using c");
                 } else {
@@ -75,6 +85,15 @@ void app_main(void)
         int raw[5], brightness[5]={0};
         err=inversion_board_read(raw);
         if(err!=ESP_OK) { inversion_board_stop(); ESP_ERROR_CHECK(err); }
+        if(testing) {
+            if(now-test_since<500) {
+                err=inversion_board_drive(55,55);
+                if(err!=ESP_OK) { inversion_board_stop(); ESP_ERROR_CHECK(err); }
+            } else {
+                testing=false; inversion_board_stop();
+                ESP_LOGI("inversion","MOTOR TEST ended; did both wheels turn? Motors stopped.");
+            }
+        }
         if(calibrating) {
             for(int i=0;i<5;i++) {
                 if(raw[i]<low[i]) low[i]=raw[i];
@@ -98,6 +117,7 @@ void app_main(void)
             }
         }
         inv_output_t out={.state=INV_WAIT};
+        if(testing) out.left=out.right=55;
         if(armed) {
             inv_step(&controller,&cfg,brightness,now,&out);
             if(!running) {
@@ -109,6 +129,7 @@ void app_main(void)
                 /* Arming never accumulates motor duty behind the stop gate. */
                 controller.left=controller.right=0;
                 controller.have_previous=false;
+                controller.motion_started=false;
                 out.left=out.right=0;
                 if(!running) out.state=INV_WAIT;
                 /* A missing line during arming is allowed indefinitely. */
@@ -128,7 +149,7 @@ void app_main(void)
         }
         if(now-last_log>=200) {
             ESP_LOGI("inversion","%s %s line b=[%d %d %d %d %d] pos=%.2f L=%.1f R=%.1f",
-                     calibrating ? "CALIBRATE" : inv_state_name(out.state),
+                     testing ? "MOTOR_TEST" : calibrating ? "CALIBRATE" : inv_state_name(out.state),
                      controller.black_line ? "BLACK" : "WHITE",
                      brightness[0],brightness[1],brightness[2],brightness[3],brightness[4],
                      (double)out.position,(double)out.left,(double)out.right);
