@@ -1,0 +1,38 @@
+menu "Inversion hardware and tuning"
+config INV_REVERSE_SENSORS
+    bool "Reverse sensor order"
+    default n
+config INV_REVERSE_LEFT
+    bool "Reverse left motor"
+    default n
+config INV_REVERSE_RIGHT
+    bool "Reverse right motor"
+    default n
+config INV_SWAP_MOTORS
+    bool "Swap left and right motors"
+    default n
+config INV_CRUISE
+    int "Cruise duty percent"
+    range 20 60
+    default 42
+config INV_CREEP
+    int "Transition / ambiguity duty percent"
+    range 15 50
+    default 32
+config INV_CONFIRM_MS
+    int "Continuous opposite-line confirmation (ms)"
+    range 10 100
+    default 20
+config INV_KP_X10
+    int "Proportional gain times 10 (duty per sensor spacing)"
+    range 0 300
+    default 140
+config INV_KD_X1000
+    int "Derivative gain times 1000 (duty seconds per sensor spacing)"
+    range 0 1000
+    default 100
+config INV_CALIBRATION_MS
+    int "Manual black/white calibration sweep duration (ms)"
+    range 3000 30000
+    default 10000
+endmenu
